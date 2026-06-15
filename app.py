@@ -89,7 +89,6 @@ def add():
     # --- LOGICA DI RAGGRUPPAMENTO ---
     trovato = False
     for item in tavoli_stato[tavolo_num]["ordine"]:
-        # Se il prodotto e le note sono identici, e non è ancora stato pagato, uniamo le quantità
         if item["prodotto"] == nome_comanda and item["note"] == nota_corrente and not item.get("pagato"):
             item["qta"] = item.get("qta", 1) + quantita
             item["prezzo"] = prezzo_unitario * item["qta"]
@@ -97,7 +96,6 @@ def add():
             break
             
     if not trovato:
-        # Se non esiste, creiamo una nuova riga
         tavoli_stato[tavolo_num]["ordine"].append({
             "prodotto": nome_comanda, 
             "qta": quantita, 
@@ -130,7 +128,13 @@ def aggiorna_pagamento(num):
     tavoli_stato[num]["gia_incassato_carta"] = float(data.get("gia_incassato_carta", 0.0))
     return jsonify({"success": True})
 
-# --- ROTTE PER LA STAMPA ---
+# --- ROTTA PER SVUOTARE IL TAVOLO MANUALMENTE ---
+@app.route('/svuota/<int:num>', methods=['POST'])
+def svuota_tavolo_diretto(num):
+    tavoli_stato[num] = {"ordine": [], "info": "", "gia_incassato_contanti": 0.0, "gia_incassato_carta": 0.0}
+    return jsonify({"success": True, "status": "Tavolo svuotato e liberato"})
+
+# --- ROTTE PER LA STAMPA MODIFICATA ---
 @app.route('/prendi_stampa', methods=['GET'])
 def prendi_stampa():
     if CODA_STAMPE:
@@ -141,19 +145,47 @@ def prendi_stampa():
 def stampa(num):
     dest = request.args.get('dest', 'bar')
     ordine_tavolo = tavoli_stato[num]["ordine"]
-    voci = [i for i in ordine_tavolo if i["reparto"] == dest and not i.get("stampato")]
     
-    if not voci:
-        return jsonify({"status": "Nessuna voce nuova"})
+    # --- NUOVA LOGICA CASSA (STAMPA TUTTO IL CONTO E SVUOTA) ---
+    if dest == 'cassa':
+        if not ordine_tavolo:
+            return jsonify({"status": "Il tavolo e' vuoto!"})
+            
+        testo = f"  ** CONTO TAVOLO {num} **\n--------------------------------\n"
+        totale_conto = 0.0
+        
+        for v in ordine_tavolo:
+            qta = v.get('qta', 1)
+            prezzo_riga = v.get('prezzo', 0.0)
+            totale_conto += prezzo_riga
+            testo += f"{qta}x {v['prodotto']}\n   {v['note']} -> {prezzo_riga:.2f} EUR\n"
+            
+        testo += "--------------------------------\n"
+        testo += f" TOTALE CONTO: {totale_conto:.2f} EUR\n"
+        testo += "--------------------------------\n\n\n\n\n"
+        
+        # Manda il conto alla coda della cassa
+        CODA_STAMPE.append({"reparto": "cassa", "corpo": testo})
+        
+        # AZZERA E LIBERA IL TAVOLO IMMEDIATAMENTE
+        tavoli_stato[num] = {"ordine": [], "info": "", "gia_incassato_contanti": 0.0, "gia_incassato_carta": 0.0}
+        return jsonify({"status": "Conto inviato alla cassa. Tavolo Liberato!"})
 
-    testo = f"TAVOLO {num}\n----------------\n"
-    for v in voci:
-        qta = v.get('qta', 1)
-        testo += f"{qta}x {v['prodotto']} {v['note']}\n"
-        v["stampato"] = True
-    
-    CODA_STAMPE.append({"reparto": dest, "corpo": testo})
-    return jsonify({"status": f"Accodato per {dest}"})
+    # --- LOGICA NORMALE PER BAR E CUCINA ---
+    else:
+        voci = [i for i in ordine_tavolo if i["reparto"] == dest and not i.get("stampato")]
+        
+        if not voci:
+            return jsonify({"status": "Nessuna voce nuova"})
+
+        testo = f"TAVOLO {num}\n----------------\n"
+        for v in voci:
+            qta = v.get('qta', 1)
+            testo += f"{qta}x {v['prodotto']} {v['note']}\n"
+            v["stampato"] = True
+        
+        CODA_STAMPE.append({"reparto": dest, "corpo": testo})
+        return jsonify({"status": f"Accodato per {dest}"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8501, debug=True)
